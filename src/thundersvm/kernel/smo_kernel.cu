@@ -290,16 +290,33 @@ namespace svm_kernel {
     __global__ void
     update_f_kernel(float_type *f, int ws_size, const float_type *alpha_diff, const kernel_type *k_mat_rows,
                     int n_instances) {
-        //"n_instances" equals to the number of rows of the whole kernel matrix for both SVC and SVR.
-        KERNEL_LOOP(idx, n_instances) {//one thread to update multiple fvalues.
-            float_type sum_diff = 0;
-            for (int i = 0; i < ws_size; ++i) {
-                float_type d = alpha_diff[i];
+
+        __shared__ float_type s_alpha_diff[MY_BLOCK_SIZE_X * MY_BLOCK_SIZE_Y];
+        __shared__ float_type sum_diff[MY_BLOCK_SIZE_X];
+        int s_idx = threadIdx.y * blockDim.x + threadIdx.x;
+        s_alpha_diff[s_idx] = alpha_diff[s_idx];
+        if (threadIdx.y == 0) {
+            sum_diff[threadIdx.x] = 0;
+        }
+        __syncthreads();
+        
+        int f_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (f_idx < n_instances) {
+            float_type sum_diff_local = 0;
+            for (int ligne = threadIdx.y; ligne < ws_size; ligne += blockDim.y) {
+                // float_type d = alpha_diff[ligne];
+                float_type d = s_alpha_diff[ligne];
                 if (d != 0) {
-                    sum_diff += d * k_mat_rows[i * n_instances + idx];
+                    sum_diff_local += d * k_mat_rows[ligne * n_instances + f_idx];
                 }
             }
-            f[idx] -= sum_diff;
+            atomicAdd_block(&sum_diff[threadIdx.x], sum_diff_local);
+
+            
+            if (threadIdx.y == 0) {
+                __syncthreads();
+                f[f_idx] -= sum_diff[threadIdx.x];
+            }
         }
     }
 
@@ -307,8 +324,12 @@ namespace svm_kernel {
     update_f(SyncArray<float_type> &f, const SyncArray<float_type> &alpha_diff, const SyncArray<kernel_type> &k_mat_rows,
              int n_instances) {
         CHRONE();
-        SAFE_KERNEL_LAUNCH(update_f_kernel, f.device_data(), alpha_diff.size(), alpha_diff.device_data(),
-                           k_mat_rows.device_data(), n_instances);
+        // SAFE_KERNEL_LAUNCH(update_f_kernel, f.device_data(), alpha_diff.size(), alpha_diff.device_data(),
+        //                    k_mat_rows.device_data(), n_instances);
+        dim3 Db = {MY_BLOCK_SIZE_X, MY_BLOCK_SIZE_Y, 1};
+        dim3 Dg = {(unsigned int) ((n_instances - 1) / (MY_BLOCK_SIZE_X) + 1),1,1};
+        update_f_kernel<<<Dg, Db>>>(f.device_data(), alpha_diff.size(), alpha_diff.device_data(), k_mat_rows.device_data(), n_instances);
+        CUDA_CHECK(cudaPeekAtLastError());
     }
 
     void sort_f(SyncArray<float_type> &f_val2sort, SyncArray<int> &f_idx2sort) {

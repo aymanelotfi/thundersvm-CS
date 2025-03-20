@@ -25,6 +25,9 @@ const int BLOCK_SIZE = 512;
 
 const int NUM_BLOCKS = 32 * 56;
 
+#define MY_BLOCK_SIZE_X 64
+#define MY_BLOCK_SIZE_Y 16
+#define MY_BLOCK_SIZE_Z 1
 
 #ifdef USE_CUDA
 
