@@ -6,24 +6,70 @@
 #include <thrust/sort.h>
 #include <thrust/system/cuda/detail/par.h>
 namespace svm_kernel {
-
     template<typename T>
     __device__ int get_block_min(const T *values, int *index) {
         int tid = threadIdx.x;
         index[tid] = tid;
         __syncthreads();
-        //block size is always the power of 2
-        for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
-            if (tid < offset) {
+	for(int offset = blockDim.x/2; offset > 32; offset >>=1){
+		if (tid < offset) {
                 if (values[index[tid + offset]] < values[index[tid]]) {
                     index[tid] = index[tid + offset];
-                }
+               }
             }
-            __syncthreads();
+	  __syncthreads();
+	}
+       
+        for (int offset = 32; offset > 0; offset >>= 1) {
+                if(tid < offset){
+			if (values[index[tid + offset]] < values[index[tid]]) {
+                    		index[tid] = index[tid + offset];
+                 	}
+		}
         }
-        return index[0];
+	__syncthreads();
+	 return index[0];
+    }
+  
+/*
+template <typename T>
+__device__ int get_block_min( const T *values, int *index) {
+    int tid = threadIdx.x;
+    index[tid] = tid;
+    __syncthreads();
+
+    for (int offset = blockDim.x / 2; offset >= 32; offset >>= 1) {
+         if(tid < offset){
+            if (values[tid + offset] < values[tid]) {
+                 index[tid] = index[tid + offset];
+                 values[tid] = values[tid + offset];
+            }
+         }
+         __syncthreads();
+
+    }
+        if(tid < 32){
+        T my_val = values[tid];
+        int my_idx = index[tid];
+        for(int offset = 16; offset > 0 ; offset/=2){
+            T other_val = __shfl_down_sync(0xffffffff,my_val,offset);
+            int other_idx = __shfl_down_sync(0xffffffff, my_idx, offset);
+            if(other_val < my_val){
+                my_val = other_val;
+                my_idx = other_idx;
+            }
+        }
+        if (tid == 0) {
+             values[0] = my_val;
+             index[0] = my_idx;
+        }
     }
 
+    __syncthreads();
+    return index[0];
+}
+
+*/
 
     __global__ void
     c_smo_solve_kernel(const int *label, float_type *f_val, float_type *alpha, float_type *alpha_diff,
@@ -289,50 +335,25 @@ namespace svm_kernel {
     __global__ void
     update_f_kernel(float_type *f, int ws_size, const float_type *alpha_diff, const kernel_type *k_mat_rows,
                     int n_instances) {
-        extern __shared__ float_type s_alpha_diff[]; // Dynamically allocated shared memory
-        
-        for (int s_idx = threadIdx.x; s_idx < ws_size; s_idx += blockDim.x) {
-            if (s_idx < ws_size) {
-                s_alpha_diff[s_idx] = alpha_diff[s_idx];
-            }
-        }            
         //"n_instances" equals to the number of rows of the whole kernel matrix for both SVC and SVR.
-       // KERNEL_LOOP(idx, n_instances) {//one thread to update multiple fvalues.
-       int idx = threadIdx.x + blockDim.x * blockIdx.x ;
-        if(idx < n_instances){
+        KERNEL_LOOP(idx, n_instances) {//one thread to update multiple fvalues.
             double sum_diff = 0;
             for (int i = 0; i < ws_size; ++i) {
-                float_type d = s_alpha_diff[i];
+                double d = alpha_diff[i];
                 if (d != 0) {
                     sum_diff += d * k_mat_rows[i * n_instances + idx];
                 }
             }
             f[idx] -= sum_diff;
         }
-}
-
-void update_f(SyncArray<float_type> &f, const SyncArray<float_type> &alpha_diff, 
-             const SyncArray<kernel_type> &k_mat_rows, int n_instances) {
-    const int ws_size = alpha_diff.size();
-    const size_t shared_mem = ws_size * sizeof(float_type);
-    //printf("shm :%d \n", shared_mem);
-    const int BLOCK_SIZE = 256;  
-    const int GRID_SIZE = (n_instances + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    
-    update_f_kernel<<<GRID_SIZE, BLOCK_SIZE, shared_mem>>>(
-        f.device_data(), 
-        ws_size,
-        alpha_diff.device_data(),
-        k_mat_rows.device_data(),
-        n_instances
-    );
-    
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Kernel launch error: %s\n", cudaGetErrorString(err));
-        exit(1);
     }
-}
+
+    void
+    update_f(SyncArray<float_type> &f, const SyncArray<float_type> &alpha_diff, const SyncArray<kernel_type> &k_mat_rows,
+             int n_instances) {
+        SAFE_KERNEL_LAUNCH(update_f_kernel, f.device_data(), alpha_diff.size(), alpha_diff.device_data(),
+                           k_mat_rows.device_data(), n_instances);
+    }
 
     void sort_f(SyncArray<float_type> &f_val2sort, SyncArray<int> &f_idx2sort) {
         thrust::sort_by_key(thrust::cuda::par, f_val2sort.device_data(), f_val2sort.device_data() + f_val2sort.size(),
