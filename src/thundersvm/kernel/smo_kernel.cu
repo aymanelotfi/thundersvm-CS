@@ -292,31 +292,31 @@ namespace svm_kernel {
                     int n_instances) {
 
         __shared__ float_type s_alpha_diff[MY_BLOCK_SIZE_X * MY_BLOCK_SIZE_Y];
-        __shared__ float_type sum_diff[MY_BLOCK_SIZE_X];
+        __shared__ float_type sum_diff[MY_BLOCK_SIZE_X * MY_BLOCK_SIZE_Y];
         int s_idx = threadIdx.y * blockDim.x + threadIdx.x;
         s_alpha_diff[s_idx] = alpha_diff[s_idx];
-        if (threadIdx.y == 0) {
-            sum_diff[threadIdx.x] = 0;
-        }
+        sum_diff[s_idx] = 0;
         __syncthreads();
         
         int f_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (f_idx < n_instances) {
-            float_type sum_diff_local = 0;
             for (int ligne = threadIdx.y; ligne < ws_size; ligne += blockDim.y) {
-                // float_type d = alpha_diff[ligne];
-                float_type d = s_alpha_diff[ligne];
-                if (d != 0) {
-                    sum_diff_local += d * k_mat_rows[ligne * n_instances + f_idx];
-                }
+                sum_diff[s_idx] += s_alpha_diff[ligne] * k_mat_rows[ligne * n_instances + f_idx];
             }
-            atomicAdd_block(&sum_diff[threadIdx.x], sum_diff_local);
 
-            
-            if (threadIdx.y == 0) {
+            __syncthreads();
+
+            for (int offset = blockDim.y >> 1; offset > 0; offset >>= 1) {
+                if (threadIdx.y >= offset) {
+                    return;
+                }
+                sum_diff[s_idx] += sum_diff[s_idx + offset * blockDim.x];
                 __syncthreads();
-                f[f_idx] -= sum_diff[threadIdx.x];
             }
+
+            // At this point, only threadIdx.y == 0 are left
+
+            f[f_idx] -= sum_diff[threadIdx.x];
         }
     }
 
